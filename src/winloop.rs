@@ -1,5 +1,12 @@
+use std::future::Future;
+use std::sync::Mutex;
+use std::time::Duration;
+use compio::runtime::event::{Event, EventHandle};
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, SetTimer, MB_OK};
+
 #[cfg(target_os = "windows")]
-pub(crate) fn message_queue() {
+pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
     use std::{future::Future, mem::MaybeUninit, sync::Mutex, time::Duration};
     use std::cell::RefCell;
     use std::sync::{Arc, Weak};
@@ -142,7 +149,13 @@ pub(crate) fn message_queue() {
     let runtime = MQRuntime::new();
 
 
-    runtime.block_on(async {
+    runtime.block_on(future)
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+fn test_window() {
+    message_queue(async{
         compio::runtime::time::sleep(Duration::from_secs(1)).await;
 
         static GLOBAL_EVENT: Mutex<Option<EventHandle>> = Mutex::new(None);
@@ -167,11 +180,5 @@ pub(crate) fn message_queue() {
         }
 
         event.wait().await;
-    });
-}
-
-#[test]
-#[cfg(target_os = "windows")]
-fn test_window() {
-    message_queue()
+    })
 }
