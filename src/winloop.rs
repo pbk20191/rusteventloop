@@ -1,5 +1,3 @@
-
-
 #[cfg(target_os = "windows")]
 pub(crate) fn message_queue() {
     use std::{future::Future, mem::MaybeUninit, sync::Mutex, time::Duration};
