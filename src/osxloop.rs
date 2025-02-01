@@ -296,6 +296,6 @@ pub(crate) fn apple_run_loop() {
         any(target_os = "macos", target_os = "ios")
     )
 )]
-pub fn test_loop() {
+fn test_loop() {
     apple_run_loop()
 }

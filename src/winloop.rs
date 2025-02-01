@@ -1,29 +1,26 @@
 
 
-#[test]
 #[cfg(target_os = "windows")]
 pub(crate) fn message_queue() {
     use std::{future::Future, mem::MaybeUninit, sync::Mutex, time::Duration};
-    use std::cell::{Cell, OnceCell, RefCell, UnsafeCell};
-    use std::sync::{ Arc, Weak };
-    use std::ptr::{null, null_mut};
+    use std::cell::RefCell;
+    use std::sync::{Arc, Weak};
     use compio::driver::AsRawFd;
     use compio::runtime::{
-        Runtime,
         event::{Event, EventHandle},
+        Runtime,
     };
-    use windows_sys::core::PCWSTR;
     use windows_sys::Win32::{
-        Foundation::{HANDLE, HWND, WAIT_FAILED, WPARAM, LPARAM, LRESULT},
+        Foundation::{HANDLE, HWND, LPARAM, LRESULT, WAIT_FAILED, WPARAM},
         System::Threading::{
-            INFINITE, GetCurrentThreadId
+            GetCurrentThreadId, INFINITE
         },
         UI::WindowsAndMessaging::{
-            DispatchMessageW, KillTimer, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
-            MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, SetTimer,
-            TranslateMessage, SetWindowsHookExW, WH_MSGFILTER, CallNextHookEx, MSG, CallMsgFilterW, MSGF_USER,
-            HHOOK, UnhookWindowsHookEx, MessageBoxW,
-            MSGF_DIALOGBOX, MSGF_MENU, MB_OK,  MSGF_MESSAGEBOX, MSGF_SCROLLBAR
+            CallMsgFilterW, CallNextHookEx, DispatchMessageW, KillTimer,
+            MessageBoxW, MsgWaitForMultipleObjectsEx, PeekMessageW, SetTimer, SetWindowsHookExW,
+            TranslateMessage, UnhookWindowsHookEx, HHOOK, MB_OK, MSGF_DIALOGBOX, MSGF_MENU,
+            MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MSGF_USER,
+            MWMO_ALERTABLE, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WH_MSGFILTER
         },
     };
     
@@ -46,6 +43,9 @@ pub(crate) fn message_queue() {
 
         }
         if code == MSGF_SCROLLBAR as i32 {
+
+        }
+        if (code == MSGF_USER as i32) {
 
         }
         unsafe {
@@ -170,4 +170,10 @@ pub(crate) fn message_queue() {
 
         event.wait().await;
     });
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+fn test_window() {
+    message_queue()
 }
