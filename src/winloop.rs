@@ -1,12 +1,12 @@
 
 
 #[test]
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 pub(crate) fn message_queue() {
     use std::{future::Future, mem::MaybeUninit, sync::Mutex, time::Duration};
     use std::cell::{Cell, OnceCell, RefCell, UnsafeCell};
+    use std::sync::{ Arc, Weak };
     use std::ptr::{null, null_mut};
-    use compio::runtime::Runtime;
     use compio::driver::AsRawFd;
     use compio::runtime::{
         Runtime,
@@ -28,19 +28,19 @@ pub(crate) fn message_queue() {
     };
     
     thread_local! {
-        static RUNTIMEREF : RefCell<*const Runtime> = RefCell::new(null());
+        static RUNTIMEREF : RefCell<Weak<Runtime>> = RefCell::new(Weak::new());
     }
 
     extern "system" fn message_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
 
         if (code == MSGF_DIALOGBOX as i32) || code == MSGF_MESSAGEBOX as i32 {
-            RUNTIMEREF.with_borrow(|boxed|{
-                if (null() != *boxed) {
-                    let strong = unsafe { &*(*boxed) };
-                    strong.poll_with(Some(Duration::ZERO));
-                    strong.run();
-                }
+            RUNTIMEREF.with_borrow(|variable| {
+               if let Some(runtime) = variable.upgrade() {
+                   runtime.poll_with(Some(Duration::ZERO));
+                   runtime.run();
+               }
             });
+
         }
         if (code == MSGF_MENU as i32) {
 
@@ -54,7 +54,7 @@ pub(crate) fn message_queue() {
     }
 
     struct MQRuntime {
-        runtime: Runtime,
+        runtime: Arc<Runtime>,
         hook:HHOOK,
     }
 
@@ -67,7 +67,7 @@ pub(crate) fn message_queue() {
             if hook == 0 {
                 panic!("{:?}", std::io::Error::last_os_error());
             }
-            let runtime = Runtime::new().unwrap();
+            let runtime = Arc::new(Runtime::new().unwrap());
 
             Self {
                 runtime,
@@ -84,7 +84,7 @@ pub(crate) fn message_queue() {
                 }
                     .detach();
                 loop {
-                    RUNTIMEREF.set(&self.runtime);
+                    RUNTIMEREF.set( Arc::downgrade(&self.runtime));
                     self.runtime.poll_with(Some(Duration::ZERO));
 
                     let remaining_tasks = self.runtime.run();
@@ -126,7 +126,7 @@ pub(crate) fn message_queue() {
                             }
                         }
                     }
-                    RUNTIMEREF.set(null());
+                    RUNTIMEREF.set(Weak::new());
 
                 }
             })

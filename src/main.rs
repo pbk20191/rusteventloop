@@ -8,11 +8,5 @@ fn main() {
     winloop::message_queue();
    #[cfg(target_os = "macos") ]
    osxloop::apple_run_loop();
-    
-    //cf_run_loop();
-}
-
-#[cfg(target_os = "windows")]
-fn what1() {
 
 }
