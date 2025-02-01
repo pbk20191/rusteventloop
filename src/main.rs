@@ -10,6 +10,10 @@ fn main() {
     });
 
    #[cfg(target_os = "macos") ]
-   osxloop::apple_run_loop();
-
+   osxloop::apple_run_loop(async {
+       
+       
+       
+       
+   });
 }

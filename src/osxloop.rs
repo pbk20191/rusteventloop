@@ -1,10 +1,12 @@
+use std::future::Future;
+
 #[cfg(
     all(
         target_vendor = "apple",
         any(target_os = "macos", target_os = "ios")
     )
 )]
-pub(crate) fn apple_run_loop() {
+pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
     use std::{
         future::Future,
         os::raw::c_void,
@@ -288,7 +290,25 @@ pub(crate) fn apple_run_loop() {
     }
     let runtime = CFRunLoopRuntime::new();
 
-    runtime.block_on(async {
+    runtime.block_on(future)
+}
+
+#[test]
+#[cfg(
+    all(
+        target_vendor = "apple",
+        any(target_os = "macos", target_os = "ios")
+    )
+)]
+fn test_loop() {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use block2::{Block, StackBlock};
+    use compio::runtime::event::Event;
+    use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRef};
+    use core_foundation::string::CFStringRef;
+    
+    apple_run_loop(async {
         compio::runtime::time::sleep(Duration::from_secs(1)).await;
 
         let event = Event::new();
@@ -310,16 +330,5 @@ pub(crate) fn apple_run_loop() {
             );
         }
         event.wait().await;
-    });
-}
-
-#[test]
-#[cfg(
-    all(
-        target_vendor = "apple",
-        any(target_os = "macos", target_os = "ios")
-    )
-)]
-fn test_loop() {
-    apple_run_loop()
+    })
 }
