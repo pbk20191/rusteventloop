@@ -1,12 +1,12 @@
-use std::cell::{Cell, OnceCell, RefCell, UnsafeCell};
-use std::ptr::{null, null_mut};
-use compio::runtime::Runtime;
+
 
 #[test]
 #[cfg(windows)]
 pub(crate) fn message_queue() {
     use std::{future::Future, mem::MaybeUninit, sync::Mutex, time::Duration};
-
+    use std::cell::{Cell, OnceCell, RefCell, UnsafeCell};
+    use std::ptr::{null, null_mut};
+    use compio::runtime::Runtime;
     use compio::driver::AsRawFd;
     use compio::runtime::{
         Runtime,
@@ -26,7 +26,7 @@ pub(crate) fn message_queue() {
             MSGF_DIALOGBOX, MSGF_MENU, MB_OK,  MSGF_MESSAGEBOX, MSGF_SCROLLBAR
         },
     };
-
+    
     thread_local! {
         static RUNTIMEREF : RefCell<*const Runtime> = RefCell::new(null());
     }
