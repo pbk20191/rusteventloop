@@ -13,11 +13,11 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
             GetCurrentThreadId, INFINITE
         },
         UI::WindowsAndMessaging::{
-            CallMsgFilterW, CallNextHookEx, DispatchMessageW
-            , MsgWaitForMultipleObjectsEx, PeekMessageW, SetWindowsHookExW,
-            TranslateMessage, UnhookWindowsHookEx, HHOOK, MSGF_DIALOGBOX, MSGF_MENU,
-            MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MSGF_USER,
-            MWMO_ALERTABLE, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WH_MSGFILTER
+            CallNextHookEx, DispatchMessageW, GetAncestor, IsDialogMessageW, MsgWaitForMultipleObjectsEx,
+            PeekMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, GA_ROOT,
+            HHOOK, MSGF_DIALOGBOX, MSGF_MENU,
+            MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MSGF_USER, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
+            PM_REMOVE, QS_ALLINPUT, WH_MSGFILTER
         },
     };
     
@@ -37,7 +37,6 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
             }
             MSGF_MENU => {}
             MSGF_SCROLLBAR => {}
-            MSGF_USER => {}
             _ => {}
         }
 
@@ -111,9 +110,8 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
                     let mut msg = MaybeUninit::uninit();
                     while unsafe{ PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, PM_REMOVE)} != 0 {
                         let msg = unsafe { msg.assume_init() };
-
                         unsafe {
-                            if CallMsgFilterW(&msg, MSGF_USER as i32) == 0 {
+                            if IsDialogMessageW(GetAncestor(msg.hwnd, GA_ROOT), &msg) == 0 {
                                 TranslateMessage(&msg);
                                 DispatchMessageW(&msg);
                             }
