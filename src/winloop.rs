@@ -2,23 +2,20 @@ use std::future::Future;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
-    use std::{future::Future, mem::MaybeUninit, sync::Mutex, time::Duration};
+    use std::{future::Future, mem::MaybeUninit, time::Duration};
     use std::cell::RefCell;
-    use std::sync::{Arc, Weak};
+    use std::rc::{Rc, Weak};
     use compio::driver::AsRawFd;
-    use compio::runtime::{
-        event::{Event, EventHandle},
-        Runtime,
-    };
+    use compio::runtime::Runtime;
     use windows_sys::Win32::{
-        Foundation::{HANDLE, HWND, LPARAM, LRESULT, WAIT_FAILED, WPARAM},
+        Foundation::{HANDLE, LPARAM, LRESULT, WAIT_FAILED, WPARAM},
         System::Threading::{
             GetCurrentThreadId, INFINITE
         },
         UI::WindowsAndMessaging::{
-            CallMsgFilterW, CallNextHookEx, DispatchMessageW, KillTimer,
-            MessageBoxW, MsgWaitForMultipleObjectsEx, PeekMessageW, SetTimer, SetWindowsHookExW,
-            TranslateMessage, UnhookWindowsHookEx, HHOOK, MB_OK, MSGF_DIALOGBOX, MSGF_MENU,
+            CallMsgFilterW, CallNextHookEx, DispatchMessageW
+            , MsgWaitForMultipleObjectsEx, PeekMessageW, SetWindowsHookExW,
+            TranslateMessage, UnhookWindowsHookEx, HHOOK, MSGF_DIALOGBOX, MSGF_MENU,
             MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MSGF_USER,
             MWMO_ALERTABLE, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WH_MSGFILTER
         },
@@ -29,32 +26,28 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
     }
 
     extern "system" fn message_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-
-        if (code == MSGF_DIALOGBOX as i32) || code == MSGF_MESSAGEBOX as i32 {
-            RUNTIMEREF.with_borrow(|variable| {
-               if let Some(runtime) = variable.upgrade() {
-                   runtime.poll_with(Some(Duration::ZERO));
-                   runtime.run();
-               }
-            });
-
+        match code as u32 { 
+            MSGF_DIALOGBOX | MSGF_MESSAGEBOX => {
+                RUNTIMEREF.with_borrow(|variable| {
+                    if let Some(runtime) = variable.upgrade() {
+                        runtime.poll_with(Some(Duration::ZERO));
+                        runtime.run();
+                    }
+                });
+            }
+            MSGF_MENU => {}
+            MSGF_SCROLLBAR => {}
+            MSGF_USER => {}
+            _ => {}
         }
-        if (code == MSGF_MENU as i32) {
 
-        }
-        if code == MSGF_SCROLLBAR as i32 {
-
-        }
-        if (code == MSGF_USER as i32) {
-
-        }
         unsafe {
             CallNextHookEx(0, code, w_param, l_param)
         }
     }
 
     struct MQRuntime {
-        runtime: Arc<Runtime>,
+        runtime: Rc<Runtime>,
         hook:HHOOK,
     }
 
@@ -67,7 +60,7 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
             if hook == 0 {
                 panic!("{:?}", std::io::Error::last_os_error());
             }
-            let runtime = Arc::new(Runtime::new().unwrap());
+            let runtime = Rc::new(Runtime::new().unwrap());
 
             Self {
                 runtime,
@@ -84,7 +77,7 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
                 }
                     .detach();
                 loop {
-                    RUNTIMEREF.set( Arc::downgrade(&self.runtime));
+                    RUNTIMEREF.set( Rc::downgrade(&self.runtime));
                     self.runtime.poll_with(Some(Duration::ZERO));
 
                     let remaining_tasks = self.runtime.run();
@@ -116,9 +109,9 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
                     }
 
                     let mut msg = MaybeUninit::uninit();
-                    let res = unsafe { PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, PM_REMOVE) };
-                    if res != 0 {
+                    while unsafe{ PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, PM_REMOVE)} != 0 {
                         let msg = unsafe { msg.assume_init() };
+
                         unsafe {
                             if CallMsgFilterW(&msg, MSGF_USER as i32) == 0 {
                                 TranslateMessage(&msg);

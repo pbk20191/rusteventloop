@@ -9,12 +9,14 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
     use std::ffi::c_int;
     use compio::driver::AsRawFd;
     use compio::runtime::Runtime;
+    use glib::MainContextFlags;
     use glib::{
         ffi::{
+            g_source_set_can_recurse,
             g_get_monotonic_time, g_source_set_callback_indirect, g_source_set_ready_time, gpointer, GSourceCallbackFuncs, GSourceFunc,
             g_source_new, gboolean, GSource, GSourceFuncs
         }, translate::{
-            IntoGlib, from_glib_full, mut_override
+            IntoGlib, from_glib_full, mut_override, ToGlibPtr
         }, ControlFlow,
         subclass::shared::RefCounted,
         {unix_fd_source_new, Priority, Source},
@@ -33,7 +35,9 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
         let pointer = (*source).callback_data as (*const Runtime);
         let a = &(*pointer);
         // a.poll_with(Some(Duration::ZERO));
-        // a.run();
+
+        // timeout is not updated until will actually run
+        a.run();
         if let Some(duration) = a.current_timeout() {
             if duration == Duration::ZERO {
                 return 1;
@@ -67,6 +71,8 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
             a.run();
             if let Some(duration) = a.current_timeout() {
                 g_source_set_ready_time(source, g_get_monotonic_time() + (duration.as_micros() as i64))
+            } else {
+                g_source_set_ready_time(source, -1);
             }
         }
         return ControlFlow::Continue.into_glib();
@@ -136,12 +142,22 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
                             g_source_set_ready_time(moved.wrapped, g_get_monotonic_time() + duration.as_micros() as i64);
                         }
                         // }
+                    } else {
+                        unsafe {
+                            g_source_set_ready_time(moved.wrapped, -1);
+                        }
                     }
                     ControlFlow::Continue
                 } else {
                     ControlFlow::Break
                 }
             });
+        unsafe {
+            let stash = source.to_glib_none();
+            let g_source:*mut GSource = stash.0;
+            g_source_set_can_recurse(g_source, 0);
+
+        }
         source.add_child_source(&timer);
         source
     }
@@ -174,10 +190,13 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
                 raw_ptr as gpointer,
                 mut_override(&CB_INFO),
             );
+
             // Arc::increment_strong_count(raw_ptr);
 
-      //      g_source_set_can_recurse(g_source, 0);
-            from_glib_full(g_source)
+            g_source_set_can_recurse(g_source, 0);
+            let source = from_glib_full(g_source);
+
+            source
         };
 
         /*
@@ -197,39 +216,44 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
         }
     }
 
+    impl Default for GLibRuntime {
+        fn default() -> Self {
+            Self::new(None)
+        }
+    }
+    
     impl GLibRuntime {
-        pub fn new() -> Self {
+        pub fn new(context:Option<MainContext>) -> Self {
 
             let runtime = Arc::new(Runtime::new().unwrap());
-            let ctx = MainContext::default();
+            let ctx = context.unwrap_or(MainContext::default());
             let timer = create_time_source(&runtime);
-
             let file_source = create_file_source(&runtime, timer);
             Self { runtime, ctx, source: file_source }
         }
 
         pub fn block_on<F: Future>(&self, future: F) -> F::Output {
             self.runtime.enter(|| {
-                let mut result = None;
-                unsafe {
-                    self.runtime
-                        .spawn_unchecked(async { result = Some(future.await) })
-                }
-                    .detach();
-                let id = self.source.attach(Some(&self.ctx));
-                self.runtime.run();
-                loop {
-                    if let Some(result) = result.take() { 
-                        id.remove();
-                        break result;
+                self.ctx.with_thread_default(move || {
+                    let mut result = None;
+                    unsafe {
+                        self.runtime
+                            .spawn_unchecked(async { result = Some(future.await) })
+                    }.detach();
+                    let id = self.source.attach(Some(&self.ctx));
+                    self.runtime.run();
+                    loop {
+                        if let Some(result) = result.take() {
+                            self.source.destroy();
+                            break result;
+                        }
+                        self.ctx.iteration(true);
                     }
-                    self.ctx.iteration(true);
-                }
+                }).expect("Can not acquire context")
             })
         }
     }
-    
-    let runtime = GLibRuntime::new();
+    let runtime = GLibRuntime::default();
 
     runtime.block_on(future)
 }

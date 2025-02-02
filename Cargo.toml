@@ -23,3 +23,7 @@ block2 = "0.6.0"
 #objc2 = { version = "0.6.0"}
 [target.'cfg(not(any(windows, target_os = "macos", target_os="ios", target_os="android")))'.dependencies]
 glib = "0.20"
+# only needed for gtk
+gtk4 = "0.9.5"
+
+[target.'cfg(not(any(windows, target_os = "macos", target_os="ios", target_os="android")))'.dev-dependencies]
