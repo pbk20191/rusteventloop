@@ -32,24 +32,30 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
        // return 1;
         let pointer = (*source).callback_data as (*const Runtime);
         let a = &(*pointer);
-        a.poll_with(Some(Duration::ZERO));
-        a.run();
+        // a.poll_with(Some(Duration::ZERO));
+        // a.run();
         if let Some(duration) = a.current_timeout() {
+            if duration == Duration::ZERO {
+                return 1;
+            }
            *timeout = duration.as_millis() as c_int;
-            g_source_set_ready_time(source, g_get_monotonic_time() + (duration.as_micros() as i64))
+            g_source_set_ready_time(source, g_get_monotonic_time() + (duration.as_micros() as i64));
+            return 0;
         } else {
             *timeout = -1;
             return 0;
         }
-        return 1;
     }
 
     unsafe extern "C" fn g_check(source: *mut GSource) -> gboolean {
-        return 1;
         let pointer = (*source).callback_data as (*const Runtime);
         let a = &(*pointer);
-        a.poll_with(Some(Duration::ZERO));
-        return 1;
+        if Some(Duration::ZERO) == a.current_timeout() {
+            a.poll_with(Some(Duration::ZERO));
+            return 1
+        } else {
+            return 0
+        }
     }
 
     unsafe extern "C" fn g_dispatch(source: *mut GSource, callback: GSourceFunc, user_data:gpointer) -> gboolean {
@@ -58,7 +64,6 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
         if let Some(cb) = callback {
             return cb(user_data);
         } else {
-            a.poll_with(Some(Duration::ZERO));
             a.run();
             if let Some(duration) = a.current_timeout() {
                 g_source_set_ready_time(source, g_get_monotonic_time() + (duration.as_micros() as i64))
@@ -144,7 +149,7 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
     fn create_time_source(runtime: &Arc<Runtime>) -> Source {
         static SOURCEWHAT: GSourceFuncs = GSourceFuncs{
             prepare: Some(g_prepare),
-            check: None,
+            check: Some(g_check),
             dispatch: Some(g_dispatch),
             finalize: Some(g_finalize),
             closure_callback: None,
@@ -212,7 +217,7 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
                 }
                     .detach();
                 let id = self.source.attach(Some(&self.ctx));
-          
+                self.runtime.run();
                 loop {
                     if let Some(result) = result.take() { 
                         id.remove();
@@ -238,8 +243,7 @@ fn gtk_test() {
     
     glib_context(
         async {
-            compio::runtime::time::sleep(Duration::from_secs(1)).await;
-
+            compio::runtime::time::sleep(Duration::from_secs(1)).await;  
             let event = Event::new();
             let handle = event.handle();
             let task = glib::spawn_future_local(async move {
