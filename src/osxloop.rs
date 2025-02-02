@@ -1,11 +1,6 @@
 use std::future::Future;
 
-#[cfg(
-    all(
-        target_vendor = "apple",
-        any(target_os = "macos", target_os = "ios")
-    )
-)]
+#[cfg(target_vendor = "apple")]
 pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
     use std::{
         cell::OnceCell,
@@ -272,12 +267,7 @@ pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
 }
 
 #[test]
-#[cfg(
-    all(
-        target_vendor = "apple",
-        any(target_os = "macos", target_os = "ios")
-    )
-)]
+#[cfg(target_vendor = "apple")]
 fn test_loop() {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;

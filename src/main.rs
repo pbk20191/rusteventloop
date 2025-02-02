@@ -1,4 +1,5 @@
 
+
 mod winloop;
 mod osxloop;
 mod gloop;
@@ -12,9 +13,39 @@ fn main() {
     
     #[cfg(target_os = "macos") ]
     osxloop::apple_run_loop(async {
-       
-       
-       
+        use cacao::appkit::{App, AppDelegate};
+        use cacao::appkit::window::Window;
+        use block2::{Block, StackBlock};
+        use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoopRef};
+        use core_foundation::string::CFStringRef;
+        use core_foundation::runloop::CFRunLoopGetCurrent;
+        
+        #[derive(Default)]
+        struct BasicApp {
+            window: Window
+        }
+
+        impl AppDelegate for BasicApp {
+            fn did_finish_launching(&self) {
+                self.window.set_minimum_content_size(400., 400.);
+                self.window.set_title("Hello World!");
+                self.window.show();
+            }
+
+            fn should_terminate_after_last_window_closed(&self) -> bool {
+                true
+            }
+        }
+        let block = StackBlock::new(move || {
+            App::new("com.hello.world", BasicApp::default()).run();
+        });
+        extern "C" {
+            fn CFRunLoopPerformBlock(rl: CFRunLoopRef, mode: CFStringRef, block: &Block<dyn Fn()>);
+        }
+        // runloop::CFRunLoop::get_current()
+        unsafe {
+            CFRunLoopPerformBlock(CFRunLoopGetCurrent(), kCFRunLoopDefaultMode, &block);
+        }
     });
     #[cfg(target_os = "linux")]
     gloop::glib_context(async {
@@ -22,11 +53,11 @@ fn main() {
 
         use gtk4::{
             gio::prelude::{
-                ApplicationExtManual, ApplicationExt
-            }, 
+                ApplicationExt, ApplicationExtManual
+            },
             prelude::{
                 ButtonExt, GtkWindowExt
-            }, 
+            },
             ApplicationWindow
         };
         let handle = glib::spawn_future_local( async move {

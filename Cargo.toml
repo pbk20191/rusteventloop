@@ -17,10 +17,15 @@ libc = { version = "0.2.169" }
 [target.'cfg(windows)'.dev-dependencies]
 #windows-sys = { version = "0.52.0", features = ["Win32_UI_WindowsAndMessaging"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(target_vendor = "apple")'.dependencies]
 core-foundation = "0.10.0"
 block2 = "0.6.0"
 #objc2 = { version = "0.6.0"}
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cacao = { version = "0.4.0-beta2", features = ["appkit"] }
+
+
 [target.'cfg(not(any(windows, target_os = "macos", target_os="ios", target_os="android")))'.dependencies]
 glib = "0.20"
 # only needed for gtk
