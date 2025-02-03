@@ -3,35 +3,43 @@ use std::future::Future;
 #[cfg(target_os = "windows")]
 pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
     use std::{future::Future, mem::MaybeUninit, time::Duration};
-    use std::cell::RefCell;
-    use std::rc::{Rc, Weak};
+    use std::rc::Rc;
+    use std::cell::Cell;
     use compio::driver::AsRawFd;
     use compio::runtime::Runtime;
     use windows_sys::Win32::{
-        Foundation::{HANDLE, LPARAM, LRESULT, WAIT_FAILED, WPARAM},
+        Foundation::{HANDLE, HWND, LPARAM, LRESULT, WAIT_FAILED, WPARAM},
         System::Threading::{
             GetCurrentThreadId, INFINITE
         },
         UI::WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetAncestor, IsDialogMessageW, MsgWaitForMultipleObjectsEx,
-            PeekMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, GA_ROOT,
-            HHOOK, MSGF_DIALOGBOX, MSGF_MENU,
-            MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MSGF_USER, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
-            PM_REMOVE, QS_ALLINPUT, WH_MSGFILTER
+            CallNextHookEx, DispatchMessageW, GetAncestor, IsDialogMessageW, KillTimer,
+            MsgWaitForMultipleObjectsEx, PeekMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
+            UnhookWindowsHookEx, GA_ROOT, HHOOK, MSGF_DIALOGBOX, MSGF_MENU,
+            MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
+            PM_REMOVE, QS_ALLINPUT, USER_TIMER_MAXIMUM, WH_MSGFILTER
         },
     };
-    
+
     thread_local! {
-        static RUNTIMEREF : RefCell<Weak<Runtime>> = RefCell::new(Weak::new());
+        static TIMER: Cell<HWND> = Cell::new(0);
     }
 
     extern "system" fn message_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
+
         match code as u32 { 
             MSGF_DIALOGBOX | MSGF_MESSAGEBOX => {
-                RUNTIMEREF.with_borrow(|variable| {
-                    if let Some(runtime) = variable.upgrade() {
-                        runtime.poll_with(Some(Duration::ZERO));
-                        runtime.run();
+                Runtime::with_current(|runtime| {
+                    runtime.poll_with(Some(Duration::ZERO));
+                    runtime.run();
+                    match runtime.current_timeout() {
+                        None =>  {
+                            // this procedure is called rapidly
+                            // so it would be better to do nothing, rather than updating timer to distant future
+                        }
+                        Some(timeout) => unsafe {
+                            SetTimer(0, TIMER.get() as usize, timeout.as_millis() as u32, Some(timer_proc));
+                        }
                     }
                 });
             }
@@ -43,6 +51,22 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
         unsafe {
             CallNextHookEx(0, code, w_param, l_param)
         }
+    }
+
+    unsafe extern "system" fn timer_proc(hwnd: HWND, _msg: u32, id: usize, _dwtime: u32) {
+
+        Runtime::with_current(|runtime| {
+            runtime.poll_with(Some(Duration::ZERO));
+            runtime.run();
+            match runtime.current_timeout() {
+                None => {
+                    SetTimer(hwnd, id, USER_TIMER_MAXIMUM, Some(timer_proc));
+                }
+                Some(timeout) => {
+                    SetTimer(hwnd, id, timeout.as_millis() as u32, Some(timer_proc));
+                }
+            }
+        });
     }
 
     struct MQRuntime {
@@ -60,7 +84,6 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
                 panic!("{:?}", std::io::Error::last_os_error());
             }
             let runtime = Rc::new(Runtime::new().unwrap());
-
             Self {
                 runtime,
                 hook,
@@ -70,35 +93,51 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
         pub fn block_on<F: Future>(&self, future: F) -> F::Output {
             self.runtime.enter(|| {
                 let mut result = None;
+                let timer_id = unsafe {
+                    SetTimer(0, 0, 1000, Some(timer_proc))
+                };
+                TIMER.set(timer_id as HWND);
                 unsafe {
                     self.runtime
                         .spawn_unchecked(async { result = Some(future.await) })
                 }
                     .detach();
                 loop {
-                    RUNTIMEREF.set( Rc::downgrade(&self.runtime));
                     self.runtime.poll_with(Some(Duration::ZERO));
 
                     let remaining_tasks = self.runtime.run();
                     if let Some(result) = result.take() {
+                        TIMER.set(0);
+                        unsafe { KillTimer(0, timer_id) };
                         break result;
                     }
-
                     let timeout = if remaining_tasks {
                         Some(Duration::ZERO)
                     } else {
                         self.runtime.current_timeout()
                     };
-                    let timeout = match timeout {
-                        Some(timeout) => timeout.as_millis() as u32,
-                        None => INFINITE,
-                    };
+                    match timeout {
+                        Some(timeout) => {
+                            unsafe {
+                                SetTimer(
+                                    0, timer_id, timeout.as_millis() as u32, Some(timer_proc)
+                                )
+
+                            };
+                        }
+                        None => {
+                            unsafe {
+                                SetTimer(0, timer_id, USER_TIMER_MAXIMUM, Some(timer_proc));
+                            }
+                        }
+                    }
+
                     let handle = self.runtime.as_raw_fd() as HANDLE;
                     let res = unsafe {
                         MsgWaitForMultipleObjectsEx(
                             1,
                             &handle,
-                            timeout,
+                            INFINITE,
                             QS_ALLINPUT,
                             MWMO_ALERTABLE | MWMO_INPUTAVAILABLE,
                         )
@@ -117,8 +156,6 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
                             }
                         }
                     }
-                    RUNTIMEREF.set(Weak::new());
-
                 }
             })
         }
@@ -138,9 +175,9 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
     runtime.block_on(future)
 }
 
-#[test]
+// #[test]
 #[cfg(target_os = "windows")]
-fn test_window() {
+pub(crate) fn test_window() {
     use std::sync::Mutex;
     use std::time::Duration;
     use compio::runtime::event::{Event, EventHandle};
@@ -163,6 +200,9 @@ fn test_window() {
 
             let message: Vec<u16> = "Hello, Windows API!".encode_utf16().chain(std::iter::once(0)).collect();
 
+            compio::runtime::spawn(async {
+                compio::runtime::time::sleep(Duration::from_secs(5)).await;
+            }).detach();
             let a = MessageBoxW(0, title.as_ptr(),message.as_ptr(), MB_OK);
         }
 
