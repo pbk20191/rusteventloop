@@ -1,7 +1,60 @@
+use std::cell::OnceCell;
 use std::future::Future;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
+    let mut cell = OnceCell::new();
+    message_queue_impl(future, Some(&cell));
+    cell.take().unwrap()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn message_loop<F>(future: F) -> i32 
+where F:Future<Output = ()> {
+    message_queue_impl(future, None)
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+pub(crate) fn test_window() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use compio::runtime::event::{Event, EventHandle};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, SetTimer, MB_OK};
+    message_queue(async{
+        compio::runtime::time::sleep(Duration::from_secs(1)).await;
+
+        static GLOBAL_EVENT: Mutex<Option<EventHandle>> = Mutex::new(None);
+
+        let event = Event::new();
+        *GLOBAL_EVENT.lock().unwrap() = Some(event.handle());
+
+        unsafe extern "system" fn timer_callback(hwnd: HWND, _msg: u32, id: usize, _dwtime: u32) {
+            let handle = GLOBAL_EVENT.lock().unwrap().take().unwrap();
+            handle.notify();
+            KillTimer(hwnd, id);
+            let a = 'A';
+            let title: Vec<u16> = "Rust MessageBox".encode_utf16().chain(std::iter::once(0)).collect();
+
+            let message: Vec<u16> = "Hello, Windows API!".encode_utf16().chain(std::iter::once(0)).collect();
+
+            compio::runtime::spawn(async {
+                compio::runtime::time::sleep(Duration::from_secs(5)).await;
+            }).detach();
+            let a = MessageBoxW(0, title.as_ptr(),message.as_ptr(), MB_OK);
+        }
+
+        unsafe {
+            SetTimer(0, 0, 1, Some(timer_callback));
+        }
+
+        event.wait().await;
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn message_queue_impl<F: Future>(future: F, store:Option<& OnceCell<F::Output>>) -> i32 {
     use std::{future::Future, mem::MaybeUninit, time::Duration};
     use std::rc::Rc;
     use std::cell::Cell;
@@ -17,7 +70,7 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
             MsgWaitForMultipleObjectsEx, PeekMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
             UnhookWindowsHookEx, GA_ROOT, HHOOK, MSGF_DIALOGBOX, MSGF_MENU,
             MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
-            PM_REMOVE, QS_ALLINPUT, USER_TIMER_MAXIMUM, WH_MSGFILTER
+            PM_REMOVE, QS_ALLINPUT, USER_TIMER_MAXIMUM, WH_MSGFILTER, WM_QUIT
         },
     };
 
@@ -27,7 +80,7 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
 
     extern "system" fn message_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
 
-        match code as u32 { 
+        match code as u32 {
             MSGF_DIALOGBOX | MSGF_MESSAGEBOX => {
                 Runtime::with_current(|runtime| {
                     runtime.poll_with(Some(Duration::ZERO));
@@ -90,7 +143,8 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
             }
         }
 
-        pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        pub fn block_on<F: Future>(&self, future: F, store:Option<& OnceCell<F::Output>>) -> i32 {
+            let mut exit_code = 0;
             self.runtime.enter(|| {
                 let mut result = None;
                 let timer_id = unsafe {
@@ -102,14 +156,18 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
                         .spawn_unchecked(async { result = Some(future.await) })
                 }
                     .detach();
-                loop {
+                'outer: loop {
                     self.runtime.poll_with(Some(Duration::ZERO));
 
                     let remaining_tasks = self.runtime.run();
                     if let Some(result) = result.take() {
-                        TIMER.set(0);
-                        unsafe { KillTimer(0, timer_id) };
-                        break result;
+                        if let Some(store) = store {
+                            if store.set(result).is_err() {
+                                panic!("Cell is initialized more than once");
+                            }
+                            break;
+                        }
+                        
                     }
                     let timeout = if remaining_tasks {
                         Some(Duration::ZERO)
@@ -149,6 +207,14 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
                     let mut msg = MaybeUninit::uninit();
                     while unsafe{ PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, PM_REMOVE)} != 0 {
                         let msg = unsafe { msg.assume_init() };
+                        if msg.message == WM_QUIT {
+                            exit_code = msg.wParam as i32;
+                            if let None = store {
+                                TIMER.set(0);
+                                unsafe { KillTimer(0, timer_id) };
+                                break 'outer;
+                            }
+                        }
                         unsafe {
                             if IsDialogMessageW(GetAncestor(msg.hwnd, GA_ROOT), &msg) == 0 {
                                 TranslateMessage(&msg);
@@ -157,7 +223,8 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
                         }
                     }
                 }
-            })
+            });
+            exit_code
         }
     }
 
@@ -171,45 +238,5 @@ pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
     }
     let runtime = MQRuntime::new();
 
-
-    runtime.block_on(future)
-}
-
-// #[test]
-#[cfg(target_os = "windows")]
-pub(crate) fn test_window() {
-    use std::sync::Mutex;
-    use std::time::Duration;
-    use compio::runtime::event::{Event, EventHandle};
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, SetTimer, MB_OK};
-    message_queue(async{
-        compio::runtime::time::sleep(Duration::from_secs(1)).await;
-
-        static GLOBAL_EVENT: Mutex<Option<EventHandle>> = Mutex::new(None);
-
-        let event = Event::new();
-        *GLOBAL_EVENT.lock().unwrap() = Some(event.handle());
-
-        unsafe extern "system" fn timer_callback(hwnd: HWND, _msg: u32, id: usize, _dwtime: u32) {
-            let handle = GLOBAL_EVENT.lock().unwrap().take().unwrap();
-            handle.notify();
-            KillTimer(hwnd, id);
-            let a = 'A';
-            let title: Vec<u16> = "Rust MessageBox".encode_utf16().chain(std::iter::once(0)).collect();
-
-            let message: Vec<u16> = "Hello, Windows API!".encode_utf16().chain(std::iter::once(0)).collect();
-
-            compio::runtime::spawn(async {
-                compio::runtime::time::sleep(Duration::from_secs(5)).await;
-            }).detach();
-            let a = MessageBoxW(0, title.as_ptr(),message.as_ptr(), MB_OK);
-        }
-
-        unsafe {
-            SetTimer(0, 0, 1, Some(timer_callback));
-        }
-
-        event.wait().await;
-    })
+    runtime.block_on(future, store)
 }
