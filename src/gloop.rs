@@ -9,7 +9,7 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
     use std::ffi::c_int;
     use compio::driver::AsRawFd;
     use compio::runtime::Runtime;
-    use glib::MainContextFlags;
+    use glib::ffi::g_source_query_unix_fd;
     use glib::{
         ffi::{
             g_source_set_can_recurse,
