@@ -1,22 +1,22 @@
-use std::cell::OnceCell;
 use std::future::Future;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn message_queue<F: Future>(future: F) -> F::Output {
-    let mut cell = OnceCell::new();
-    message_queue_impl(future, Some(&cell));
-    cell.take().unwrap()
+    use crate::winloop::job_specialization::FutureJob;
+
+    message_queue_impl(FutureJob{ variable: None }, future)
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn message_loop<F>(future: F) -> i32 
-where F:Future<Output = ()> {
-    message_queue_impl(future, None)
+pub(crate) fn message_loop() -> i32 {
+    use crate::winloop::job_specialization::NeverJob;
+
+    message_queue_impl(NeverJob{}, ())
 }
 
 #[test]
 #[cfg(target_os = "windows")]
-pub(crate) fn test_window() {
+pub(self) fn test_window() {
     use std::sync::Mutex;
     use std::time::Duration;
     use compio::runtime::event::{Event, EventHandle};
@@ -53,11 +53,10 @@ pub(crate) fn test_window() {
     })
 }
 
+
 #[cfg(target_os = "windows")]
-fn message_queue_impl<F: Future>(future: F, store:Option<& OnceCell<F::Output>>) -> i32 {
-    use std::{future::Future, mem::MaybeUninit, time::Duration};
-    use std::rc::Rc;
-    use std::cell::Cell;
+fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) -> J::Output {
+    use std::{mem::MaybeUninit, time::Duration};
     use compio::driver::AsRawFd;
     use compio::runtime::Runtime;
     use windows_sys::Win32::{
@@ -69,31 +68,36 @@ fn message_queue_impl<F: Future>(future: F, store:Option<& OnceCell<F::Output>>)
             CallNextHookEx, DispatchMessageW, GetAncestor, IsDialogMessageW, KillTimer,
             MsgWaitForMultipleObjectsEx, PeekMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
             UnhookWindowsHookEx, GA_ROOT, HHOOK, MSGF_DIALOGBOX, MSGF_MENU,
-            MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
+            MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE, MSG,
             PM_REMOVE, QS_ALLINPUT, USER_TIMER_MAXIMUM, WH_MSGFILTER, WM_QUIT
         },
     };
-
-    thread_local! {
-        static TIMER: Cell<HWND> = Cell::new(0);
+    
+    struct OwnedTimer {
+        native: usize
     }
+    scoped_tls::scoped_thread_local!(static CURRENT_TIMER: OwnedTimer);
 
     extern "system" fn message_proc(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
 
         match code as u32 {
             MSGF_DIALOGBOX | MSGF_MESSAGEBOX => {
                 Runtime::with_current(|runtime| {
+                    
                     runtime.poll_with(Some(Duration::ZERO));
                     runtime.run();
-                    match runtime.current_timeout() {
-                        None =>  {
-                            // this procedure is called rapidly
-                            // so it would be better to do nothing, rather than updating timer to distant future
+                    CURRENT_TIMER.with(|timer| {
+                        match runtime.current_timeout() {
+                            None =>  {
+                                // this procedure is called rapidly
+                                // so it would be better to do nothing, rather than updating timer to distant future
+                            }
+                            Some(timeout) => unsafe {
+                                SetTimer(0, timer.native, timeout.as_millis() as u32, Some(timer_proc));
+                            }
                         }
-                        Some(timeout) => unsafe {
-                            SetTimer(0, TIMER.get() as usize, timeout.as_millis() as u32, Some(timer_proc));
-                        }
-                    }
+                    });
+
                 });
             }
             MSGF_MENU => {}
@@ -122,121 +126,192 @@ fn message_queue_impl<F: Future>(future: F, store:Option<& OnceCell<F::Output>>)
         });
     }
 
-    struct MQRuntime {
-        runtime: Rc<Runtime>,
-        hook:HHOOK,
-    }
 
-    impl MQRuntime {
-
-        pub fn new() -> Self {
-            let hook = unsafe {
-                SetWindowsHookExW(WH_MSGFILTER, Some(message_proc), 0, GetCurrentThreadId())
-            };
-            if hook == 0 {
-                panic!("{:?}", std::io::Error::last_os_error());
-            }
-            let runtime = Rc::new(Runtime::new().unwrap());
-            Self {
-                runtime,
-                hook,
-            }
-        }
-
-        pub fn block_on<F: Future>(&self, future: F, store:Option<& OnceCell<F::Output>>) -> i32 {
-            let mut exit_code = 0;
-            self.runtime.enter(|| {
-                let mut result = None;
-                let timer_id = unsafe {
-                    SetTimer(0, 0, 1000, Some(timer_proc))
-                };
-                TIMER.set(timer_id as HWND);
-                unsafe {
-                    self.runtime
-                        .spawn_unchecked(async { result = Some(future.await) })
-                }
-                    .detach();
-                'outer: loop {
-                    self.runtime.poll_with(Some(Duration::ZERO));
-
-                    let remaining_tasks = self.runtime.run();
-                    if let Some(result) = result.take() {
-                        if let Some(store) = store {
-                            if store.set(result).is_err() {
-                                panic!("Cell is initialized more than once");
-                            }
-                            break;
-                        }
-                        
-                    }
-                    let timeout = if remaining_tasks {
-                        Some(Duration::ZERO)
-                    } else {
-                        self.runtime.current_timeout()
-                    };
-                    match timeout {
-                        Some(timeout) => {
-                            unsafe {
-                                SetTimer(
-                                    0, timer_id, timeout.as_millis() as u32, Some(timer_proc)
-                                )
-
-                            };
-                        }
-                        None => {
-                            unsafe {
-                                SetTimer(0, timer_id, USER_TIMER_MAXIMUM, Some(timer_proc));
-                            }
-                        }
-                    }
-
-                    let handle = self.runtime.as_raw_fd() as HANDLE;
-                    let res = unsafe {
-                        MsgWaitForMultipleObjectsEx(
-                            1,
-                            &handle,
-                            INFINITE,
-                            QS_ALLINPUT,
-                            MWMO_ALERTABLE | MWMO_INPUTAVAILABLE,
-                        )
-                    };
-                    if res == WAIT_FAILED {
-                        panic!("{:?}", std::io::Error::last_os_error());
-                    }
-
-                    let mut msg = MaybeUninit::uninit();
-                    while unsafe{ PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, PM_REMOVE)} != 0 {
-                        let msg = unsafe { msg.assume_init() };
-                        if msg.message == WM_QUIT {
-                            exit_code = msg.wParam as i32;
-                            if let None = store {
-                                TIMER.set(0);
-                                unsafe { KillTimer(0, timer_id) };
-                                break 'outer;
-                            }
-                        }
-                        unsafe {
-                            if IsDialogMessageW(GetAncestor(msg.hwnd, GA_ROOT), &msg) == 0 {
-                                TranslateMessage(&msg);
-                                DispatchMessageW(&msg);
-                            }
-                        }
-                    }
-                }
-            });
-            exit_code
-        }
-    }
-
-    impl Drop for MQRuntime {
+    impl Drop for OwnedTimer {
+        
         fn drop(&mut self) {
-            let hook = self.hook;
             unsafe {
-                UnhookWindowsHookEx(hook);
+                KillTimer(0, self.native);
             }
         }
     }
-    let runtime = MQRuntime::new();
+    
+    
+    struct OwnedWindowHook {
+        native: HHOOK
+    }
+    
+    impl Drop for OwnedWindowHook {
+        fn drop(&mut self) {
+            unsafe {
+                UnhookWindowsHookEx(self.native);
+            }
+        }
+    }
+    let _hook =  {
+        let value = unsafe {
+            SetWindowsHookExW(WH_MSGFILTER, Some(message_proc), 0, GetCurrentThreadId())
+        };
+        if value == 0 {
+            panic!("{:?}", std::io::Error::last_os_error());
+        }
+        OwnedWindowHook{ native: value }
+    };
+    let timer =  {
+        let handle = unsafe{
+            SetTimer(0, 0, 1000, Some(timer_proc))
+        };
+        if handle == 0 {
+            panic!("{:?}", std::io::Error::last_os_error());
+        }
+        
+        OwnedTimer{ native:handle }
+    };
+    let runtime = Runtime::new().unwrap();
+    let runtime_ref = &runtime;
+    runtime.enter(move || {
+        CURRENT_TIMER.set(&timer,  move || {
+            let mut my_job = job;
+            my_job.spawn(input, runtime_ref);
+            use std::ptr::null;
+            'outer: loop {
+                runtime_ref.poll_with(Some(Duration::ZERO));
+                let remaining_tasks = runtime_ref.run();
+                if let Some(result) = my_job.check(null()) {
+                    break result;
+                }
+                let timeout = if remaining_tasks {
+                    Some(Duration::ZERO)
+                } else {
+                    runtime_ref.current_timeout()
+                };
+                match timeout {
+                    Some(timeout) => {
+                        unsafe {
+                            SetTimer(
+                                0, timer.native, timeout.as_millis() as u32, Some(timer_proc)
+                            )
+                        };
+                    }
+                    None => {
+                        unsafe {
+                            SetTimer(0, timer.native, USER_TIMER_MAXIMUM, Some(timer_proc));
+                        }
+                    }
+                }
 
-    runtime.block_on(future, store)
+                let handle = runtime_ref.as_raw_fd() as HANDLE;
+                let res = unsafe {
+                    MsgWaitForMultipleObjectsEx(
+                        1,
+                        &handle,
+                        INFINITE,
+                        QS_ALLINPUT,
+                        MWMO_ALERTABLE | MWMO_INPUTAVAILABLE,
+                    )
+                };
+                if res == WAIT_FAILED {
+                    panic!("{:?}", std::io::Error::last_os_error());
+                }
+                let mut msg = MaybeUninit::uninit();
+                while unsafe{ PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, PM_REMOVE)} != 0 {
+                    let msg = unsafe { msg.assume_init() };
+                    if msg.message == WM_QUIT {
+                        let k = &msg;
+                        use std::ffi::c_void;
+
+                        let k2 = (k as *const MSG) as *const c_void;
+                        if let Some(value) = my_job.check(k2) {
+                            break 'outer value;
+                        }
+                    }
+                    unsafe {
+                        if IsDialogMessageW(GetAncestor(msg.hwnd, GA_ROOT), &msg) == 0 {
+                            TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                    }
+                }
+            }
+        })
+    })
+}
+
+
+#[cfg(target_os = "windows")]
+mod job_specialization {
+    use compio::runtime::Runtime;
+    use std::ffi::c_void;
+    use std::future::Future;
+
+    pub trait JobTrait {
+
+        type Output;
+        type Input;
+        // fn check() -> bool;
+
+        fn spawn(&mut self, input:Self::Input, runtime: &Runtime);
+
+        fn check(&mut self, msg: *const c_void) -> Option<Self::Output>;
+
+    }
+
+    pub struct FutureJob <F:Future>{
+
+
+        pub variable:Option<F::Output>,
+    }
+
+    pub struct NeverJob {
+
+    }
+
+    impl JobTrait for NeverJob {
+
+        type Output = i32;
+        type Input = ();
+
+        fn spawn(&mut self, _input: Self::Input, _runtime: &Runtime) {
+
+        }
+
+        fn check(&mut self, msg: *const c_void) -> Option<Self::Output> {
+            if msg.is_null() {
+                return None;
+            }
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                MSG, WM_QUIT
+            };
+
+            let message = &unsafe { *(msg as *const MSG) };
+            if message.message == WM_QUIT {
+                Some(message.wParam as i32)
+            } else {
+                None
+            }
+        }
+    }
+
+    impl <F:Future> JobTrait for FutureJob<F> {
+        type Output = F::Output;
+        type Input = F;
+
+        fn spawn(&mut self, input: Self::Input, runtime: &Runtime) {
+            unsafe {
+                runtime.spawn_unchecked(async move {
+                    self.variable = Some(input.await);
+                }).detach()
+            }
+        }
+
+        fn check(&mut self, _msg: *const c_void) -> Option<Self::Output> {
+            if let Some(variable) = self.variable.take() {
+                Some(variable)
+            } else {
+                None
+            }
+        }
+
+
+    }
 }
