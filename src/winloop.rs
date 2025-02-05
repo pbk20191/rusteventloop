@@ -67,8 +67,8 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
         UI::WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetAncestor, IsDialogMessageW, KillTimer,
             MsgWaitForMultipleObjectsEx, PeekMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
-            UnhookWindowsHookEx, GA_ROOT, HHOOK, MSGF_DIALOGBOX, MSGF_MENU,
-            MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE, MSG,
+            UnhookWindowsHookEx, GA_ROOT, HHOOK, MSG, MSGF_DIALOGBOX,
+            MSGF_MENU, MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
             PM_REMOVE, QS_ALLINPUT, USER_TIMER_MAXIMUM, WH_MSGFILTER, WM_QUIT
         },
     };
