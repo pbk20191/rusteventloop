@@ -2,260 +2,120 @@ use std::future::Future;
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "android")))]
 pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
-    use std::{future::Future, time::Duration};
-    use std::sync::Arc;
-    use std::os::raw::c_uint;
-    use std::sync::Weak;
-    use std::ffi::c_int;
+    use std::cell::RefCell;
+    use std::ptr::null_mut;
+    use std::time::Duration;
     use compio::driver::AsRawFd;
     use compio::runtime::Runtime;
-    use glib::ffi::g_source_query_unix_fd;
+    use glib::ffi::{g_source_add_unix_fd, g_source_query_unix_fd};
+    
+    use glib::translate::FromGlib;
+    
     use glib::{
-        ffi::{
-            g_source_set_can_recurse,
-            g_get_monotonic_time, g_source_set_callback_indirect, g_source_set_ready_time, gpointer, GSourceCallbackFuncs, GSourceFunc,
-            g_source_new, gboolean, GSource, GSourceFuncs
-        }, translate::{
-            IntoGlib, from_glib_full, mut_override, ToGlibPtr
-        }, ControlFlow,
-        subclass::shared::RefCounted,
-        {unix_fd_source_new, Priority, Source},
+        ffi::gpointer, translate::IntoGlib, ControlFlow,
         IOCondition,
         MainContext
     };
 
-    struct GLibRuntime {
-        runtime: Arc<Runtime>,
-        ctx: MainContext,
-        source: Source,
+    struct DriverSource {
+        runtime:Runtime,
+        tag:RefCell<gpointer>
     }
 
-    unsafe extern "C" fn g_prepare(source: *mut GSource, timeout: *mut c_int) -> gboolean {
-       // return 1;
-        let pointer = (*source).callback_data as (*const Runtime);
-        let a = &(*pointer);
-        // a.poll_with(Some(Duration::ZERO));
-
-        // timeout is not updated until will actually run
-        a.run();
-        if let Some(duration) = a.current_timeout() {
-            if duration == Duration::ZERO {
-                return 1;
-            }
-           *timeout = duration.as_millis() as c_int;
-            g_source_set_ready_time(source, g_get_monotonic_time() + (duration.as_micros() as i64));
-            return 0;
-        } else {
-            *timeout = -1;
-            return 0;
-        }
-    }
-
-    unsafe extern "C" fn g_check(source: *mut GSource) -> gboolean {
-        let pointer = (*source).callback_data as (*const Runtime);
-        let a = &(*pointer);
-        if Some(Duration::ZERO) == a.current_timeout() {
-            a.poll_with(Some(Duration::ZERO));
-            return 1
-        } else {
-            return 0
-        }
-    }
-
-    unsafe extern "C" fn g_dispatch(source: *mut GSource, callback: GSourceFunc, user_data:gpointer) -> gboolean {
-        let pointer = (*source).callback_data as (*const Runtime);
-        let a = &(*pointer);
-        if let Some(cb) = callback {
-            return cb(user_data);
-        } else {
-            a.run();
-            if let Some(duration) = a.current_timeout() {
-                g_source_set_ready_time(source, g_get_monotonic_time() + (duration.as_micros() as i64))
-            } else {
-                g_source_set_ready_time(source, -1);
+    impl DriverSource {
+        
+        fn new() -> Self {
+            let runtime = Runtime::new().unwrap();
+            return Self {
+                runtime,
+                tag: RefCell::new(null_mut())
             }
         }
-        return ControlFlow::Continue.into_glib();
     }
 
-    unsafe extern "C" fn g_finalize(source: *mut GSource) {
+    impl source_util::SourceFuncs for DriverSource {
 
-        // let ptr = (*source).callback_data as *const Runtime;
-        // Arc::decrement_strong_count(ptr);
-    }
-
-    unsafe extern "C" fn g_retain(data:gpointer) {
-        let ptr = data as *const Runtime;
-        Arc::increment_strong_count(ptr);
-    }
-    unsafe extern "C" fn g_release(data:gpointer) {
-        let ptr = data as *const Runtime;
-        Arc::decrement_strong_count(ptr);
-    }
-
-    // fn(gpointer, *mut GSource, *mut GSourceFunc, *mut gpointer)>,
-    unsafe extern "C" fn g_get(
-        data: gpointer, source: *mut GSource, cb:*mut GSourceFunc, result: *mut gpointer,
-    ) {
-        let ptr = data as *const Runtime;
-
-    }
-
-    fn create_file_source(
-        runtime: &Arc<Runtime>,
-        timer: Source,
-    ) -> Source {
-        struct UnsafeWrapper {
-            wrapped: Weak<Runtime>
-        }
-        unsafe impl Send for UnsafeWrapper {}
-        impl Clone for UnsafeWrapper {
-            fn clone(&self) -> Self {
-                UnsafeWrapper{ wrapped: self.wrapped.clone() }
+        fn prepare(&self, _source:&glib::Source) -> (bool, Option<u32>) {
+            if self.runtime.run() {
+                return (true, None)
             }
-        }
-        struct UnsafeSending {
-            wrapped: *mut GSource,
-        }
-        unsafe impl Send for UnsafeSending {}
-        let weak_runtime = Arc::downgrade(&runtime);
-        let wrapped = UnsafeWrapper{ wrapped: weak_runtime };
-        // let boxed = Box::new(timer);
-        let ptr = UnsafeSending{ wrapped: timer.as_ptr() };
-        let source = unix_fd_source_new(
-            runtime.as_raw_fd(),
-            IOCondition::IN,
-            Some("what"),
-            Priority::DEFAULT,
-            move |_fd, _condition| {
-                let moved = &ptr;
-                let a = wrapped.clone();
-                if let Some(runtime) = a.wrapped.upgrade() {
+            if let Some(timeout) = self.runtime.current_timeout() {
 
-                    runtime.poll_with(Some(Duration::ZERO));
-                    runtime.run();
-                    if let Some(duration) = runtime.current_timeout() {
-                        
-                        // if let Some(source) = weak.upgrade() {
-                        //     let stash = source.to_glib_none();
-                        unsafe {
-                            g_source_set_ready_time(moved.wrapped, g_get_monotonic_time() + duration.as_micros() as i64);
-                        }
-                        // }
-                    } else {
-                        unsafe {
-                            g_source_set_ready_time(moved.wrapped, -1);
-                        }
-                    }
-                    ControlFlow::Continue
-                } else {
-                    ControlFlow::Break
+                if (timeout == Duration::ZERO) {
+                    return (true, None)
                 }
-            });
-        unsafe {
-            let stash = source.to_glib_none();
-            let g_source:*mut GSource = stash.0;
-            g_source_set_can_recurse(g_source, 0);
+                return (false, Some(timeout.as_millis() as u32))
 
+            } else {
+                
+                return (false, None)
+            }
         }
-        source.add_child_source(&timer);
-        source
-    }
 
-    fn create_time_source(runtime: &Arc<Runtime>) -> Source {
-        static SOURCEWHAT: GSourceFuncs = GSourceFuncs{
-            prepare: Some(g_prepare),
-            check: Some(g_check),
-            dispatch: Some(g_dispatch),
-            finalize: Some(g_finalize),
-            closure_callback: None,
-            closure_marshal: None,
-        };
-
-       let raw_ptr = unsafe { runtime.clone().into_raw() };
-        let source = unsafe {
-            let block_size = size_of::<GSource>();
-            let g_source = g_source_new(
-                mut_override(&SOURCEWHAT),
-                (block_size) as c_uint
-            );
-            //Arc::increment_strong_count(raw_ptr);
-            static CB_INFO: GSourceCallbackFuncs = GSourceCallbackFuncs{
-                ref_: Some(g_retain),
-                unref: Some(g_release),
-                get: Some(g_get),
-            };
-            g_source_set_callback_indirect(
-                g_source,
-                raw_ptr as gpointer,
-                mut_override(&CB_INFO),
-            );
-
-            // Arc::increment_strong_count(raw_ptr);
-
-            g_source_set_can_recurse(g_source, 0);
-            let source = from_glib_full(g_source);
-
-            source
-        };
-
-        /*
-                source: *mut GSource,
-        func: GSourceFunc,
-        data: gpointer,
-        notify: GDestroyNotify,
-        */
-   //     let arc = unsafe {  Arc::from_raw(raw_ptr) };
-
-        source
-    }
-
-    impl Drop for GLibRuntime {
-        fn drop(&mut self) {
-            self.source.destroy();
-        }
-    }
-
-    impl Default for GLibRuntime {
-        fn default() -> Self {
-            Self::new(None)
-        }
-    }
     
-    impl GLibRuntime {
-        pub fn new(context:Option<MainContext>) -> Self {
-
-            let runtime = Arc::new(Runtime::new().unwrap());
-            let ctx = context.unwrap_or(MainContext::default());
-            let timer = create_time_source(&runtime);
-            let file_source = create_file_source(&runtime, timer);
-            Self { runtime, ctx, source: file_source }
+        fn check(&self, source:&glib::Source) -> bool {
+            let condition =  {
+                let k = self.tag.borrow();
+                unsafe {
+                    IOCondition::from_glib(
+                        g_source_query_unix_fd(source.as_ptr(), *k)
+                    )
+                }
+            };
+            self.runtime.poll_with(Some(Duration::ZERO));
+            if condition == IOCondition::IN {
+                return true
+            }
+            if self.runtime.current_timeout() == Some(Duration::ZERO) {
+                return true
+            }
+            return false
         }
 
-        pub fn block_on<F: Future>(&self, future: F) -> F::Output {
-            self.runtime.enter(|| {
-                self.ctx.with_thread_default(move || {
-                    let mut result = None;
-                    unsafe {
-                        self.runtime
-                            .spawn_unchecked(async { result = Some(future.await) })
-                    }.detach();
-                    let id = self.source.attach(Some(&self.ctx));
-                    self.runtime.run();
-                    loop {
-                        if let Some(result) = result.take() {
-                            self.source.destroy();
-                            break result;
-                        }
-                        self.ctx.iteration(true);
-                    }
-                }).expect("Can not acquire context")
-            })
+        fn dispatch(&self, _source:&glib::Source) -> glib::ControlFlow {
+            self.runtime.run();
+            return ControlFlow::Continue;
         }
+    
+
     }
-    let runtime = GLibRuntime::default();
 
-    runtime.block_on(future)
+    let source = source_util::new_source(DriverSource::new());
+    let data:&DriverSource = source_util::source_get(&source);
+    {
+        let mut mut_tag = data.tag.borrow_mut();
+    
+        *mut_tag = unsafe {
+            let k = g_source_add_unix_fd(source.as_ptr(), data.runtime.as_raw_fd(), IOCondition::IN.into_glib());
+            k
+        };
+    }
+
+    let runtime = &data.runtime;
+
+    let ctx = MainContext::default();
+    return runtime.enter(|| {
+        ctx.with_thread_default( || {
+            let mut result = None;
+            unsafe {
+                runtime
+                    .spawn_unchecked(async { 
+                        
+                        result = Some(future.await); 
+                        let ctx = MainContext::ref_thread_default();
+                        ctx.wakeup();
+                    })
+            }.detach();
+            let _id = source.attach(Some(&ctx));
+            loop {
+                if let Some(result) = result.take() {
+                    source.destroy();
+                    break result;
+                }
+                ctx.iteration(true);
+            }
+        }).expect("Can not acquire context")
+    });
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "android")))]
@@ -277,4 +137,93 @@ fn gtk_test() {
             task.await.unwrap();
         }
     )
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "android")))]
+mod source_util {
+    use std::{ffi::c_int, mem, ptr};
+
+    use glib::{
+        ffi::{
+            g_source_new, GSource, GSourceFunc, GSourceFuncs
+        }, translate::{
+            from_glib_borrow, from_glib_full, Borrowed, IntoGlib, ToGlibPtr
+        }, ControlFlow, Source
+    };
+
+
+    pub trait SourceFuncs {
+        fn check(&self, _source:&Source) -> bool {
+            false
+        }
+    
+        fn dispatch(&self, source:&Source) -> ControlFlow;
+        fn prepare(&self, source:&Source) -> (bool, Option<u32>);
+    }
+    
+    #[repr(C)]
+    struct SourceData<T> {
+        _source: GSource,
+        funcs: Box<GSourceFuncs>,
+        data: T,
+    }
+    
+    pub fn new_source<T: SourceFuncs>(data: T) -> Source {
+        unsafe {
+            let mut funcs: GSourceFuncs = mem::zeroed();
+            funcs.prepare = Some(prepare::<T>);
+            funcs.check = Some(check::<T>);
+            funcs.dispatch = Some(dispatch::<T>);
+            funcs.finalize = Some(finalize::<T>);
+            let mut funcs = Box::new(funcs);
+            let source = g_source_new(&mut *funcs, mem::size_of::<SourceData<T>>() as u32);
+            ptr::write(&mut (*(source as *mut SourceData<T>)).data, data);
+            ptr::write(&mut (*(source as *mut SourceData<T>)).funcs, funcs);
+            from_glib_full(source)
+        }
+    }
+    
+    pub fn source_get<T: SourceFuncs>(source: &Source) -> &T {
+        unsafe {
+            &(*(<Source as ToGlibPtr<'_, *mut GSource>>::to_glib_none(source).0
+                as *const SourceData<T>))
+                .data
+        }
+    }
+    
+    unsafe extern "C" fn check<T: SourceFuncs>(source: *mut GSource) -> c_int {
+        let object = source as *mut SourceData<T>;
+        let a:Borrowed<Source> = from_glib_borrow(source);
+        bool_to_int((*object).data.check(a.as_ref()))
+    }
+    
+    unsafe extern "C" fn dispatch<T: SourceFuncs>(source: *mut GSource, _callback: GSourceFunc, _user_data: *mut libc::c_void)
+        -> c_int
+    {
+        let object = source as *mut SourceData<T>;
+        let a:Borrowed<Source> = from_glib_borrow(source);
+        let control = (*object).data.dispatch(a.as_ref());
+        control.into_glib()
+    }
+    
+    unsafe extern "C" fn finalize<T: SourceFuncs>(source: *mut GSource) {
+        // TODO: needs a bomb to abort on panic
+        let source = source as *mut SourceData<T>;
+        ptr::read(&(*source).funcs);
+        ptr::read(&(*source).data);
+    }
+    
+    extern "C" fn prepare<T: SourceFuncs>(source: *mut GSource, timeout: *mut c_int) -> c_int {
+        let object = source as *mut SourceData<T>;
+        let a:Borrowed<Source> = unsafe { from_glib_borrow(source) };
+        let (result, source_timeout) = unsafe { (*object).data.prepare(a.as_ref()) };
+        if let Some(source_timeout) = source_timeout {
+            unsafe { *timeout = source_timeout as i32; }
+        }
+        bool_to_int(result)
+    }
+    
+    fn bool_to_int(boolean: bool) -> c_int {
+        boolean.into()
+    }
 }
