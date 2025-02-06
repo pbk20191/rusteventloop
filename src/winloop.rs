@@ -131,7 +131,7 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
 
             runtime_ref.poll_with(Some(Duration::ZERO));
             runtime_ref.run();
-
+            
             match runtime_ref.current_timeout() {
                 None => unsafe {
                     SetTimer(0, timer_ref.native, USER_TIMER_MAXIMUM, *timer_proc_ref.borrow());

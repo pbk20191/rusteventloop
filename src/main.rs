@@ -1,15 +1,18 @@
-
-
 mod winloop;
 mod osxloop;
 mod gloop;
 
 fn main() {
-
     #[cfg(target_os = "windows")]
-    winloop::message_queue(async {
+    {
+        extern crate native_windows_gui as nwg;
+        use nwg::NativeUi;
+        nwg::init().expect("Failed to init Native Windows GUI");
+        let _app = window_app::BasicApp::build_ui(Default::default()).expect("Failed to build UI");
+        winloop::message_loop();
 
-    });
+    };
+   
     
     #[cfg(target_os = "macos") ]
     osxloop::apple_run_loop(async {
@@ -96,4 +99,39 @@ fn main() {
         });
         handle.await.unwrap();
     })
+}
+
+
+#[cfg(target_os = "windows")]
+mod window_app {
+    extern crate native_windows_gui as nwg;
+    extern crate native_windows_derive as nwd;
+    use nwd::NwgUi;
+
+    #[derive(Default, NwgUi)]
+    pub struct BasicApp {
+        #[nwg_control(size: (300, 115), position: (300, 300), title: "Basic example", flags: "WINDOW|VISIBLE")]
+        #[nwg_events( OnWindowClose: [BasicApp::say_goodbye] )]
+        window: nwg::Window,
+
+        #[nwg_control(text: "Heisenberg", size: (280, 25), position: (10, 10))]
+        name_edit: nwg::TextInput,
+
+        #[nwg_control(text: "Say my name", size: (280, 60), position: (10, 40))]
+        #[nwg_events( OnButtonClick: [BasicApp::say_hello] )]
+        hello_button: nwg::Button
+    }
+
+    impl BasicApp {
+
+        fn say_hello(&self) {
+            nwg::simple_message("Hello", &format!("Hello {}", self.name_edit.text()));
+        }
+
+        fn say_goodbye(&self) {
+            nwg::simple_message("Goodbye", &format!("Goodbye {}", self.name_edit.text()));
+            nwg::stop_thread_dispatch();
+        }
+
+    }
 }
