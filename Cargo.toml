@@ -28,7 +28,7 @@ compio-driver = { version = "0.6.1", features = ["io-uring-socket", "io-uring"] 
 #windows-sys = { version = "0.52.0", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
-core-foundation = "0.10.0"
+core-foundation = { version = "0.10.0", features = ["default"]}
 block2 = "0.6.0"
 #objc2 = { version = "0.6.0"}
 
