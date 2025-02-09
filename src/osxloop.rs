@@ -1,40 +1,36 @@
 use std::future::Future;
-use core_foundation::runloop::kCFRunLoopCommonModes;
-use core_foundation::string::{kCFStringEncodingASCII, CFStringCreateWithCString};
 
 #[cfg(target_vendor = "apple")]
 pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
     use std::{
+        mem::transmute,
         os::raw::c_void,
-        rc::{Rc, Weak},
-        time::Duration,
-        mem::{
-            transmute,
-        },
         ptr::{
             null, null_mut
         },
+        rc::{Rc, Weak},
+        time::Duration,
     };
     use compio::driver::AsRawFd;
     use compio::runtime::Runtime;
     use block2::{
-        StackBlock, Block
+        Block, StackBlock
     };
     use core_foundation::{
         base::{
-            CFTypeRef, TCFType, CFAllocatorRef, CFOptionFlags, CFIndex, Boolean, 
+            Boolean, CFAllocatorRef, CFIndex, CFOptionFlags, CFTypeRef, TCFType,
         },
-        string:: {
-            CFStringRef, CFString
-        },
-        date::{ CFAbsoluteTime, CFAbsoluteTimeGetCurrent, CFTimeInterval },
-        filedescriptor::{kCFFileDescriptorReadCallBack, CFFileDescriptor, CFFileDescriptorContext, CFFileDescriptorRef, CFFileDescriptorInvalidate},
+        date::{CFAbsoluteTime, CFAbsoluteTimeGetCurrent, CFTimeInterval},
+        filedescriptor::{kCFFileDescriptorReadCallBack, CFFileDescriptor, CFFileDescriptorContext, CFFileDescriptorInvalidate, CFFileDescriptorRef},
         runloop::{kCFRunLoopAllActivities, kCFRunLoopBeforeWaiting, kCFRunLoopDefaultMode, CFRunLoop,
-                  CFRunLoopActivity, CFRunLoopGetCurrent, CFRunLoopObserver,CFRunLoopRef,
-                  CFRunLoopObserverInvalidate
-                  , CFRunLoopSource, CFRunLoopSourceContext, CFRunLoopSourceCreate, CFRunLoopSourceInvalidate, CFRunLoopSourceSignal,
-                  CFRunLoopStop, CFRunLoopTimer, CFRunLoopTimerInvalidate, CFRunLoopTimerSetNextFireDate, CFRunLoopWakeUp,
-                  CFRunLoopTimerRef, CFRunLoopObserverRef
+                  CFRunLoopActivity, CFRunLoopGetCurrent, CFRunLoopObserver, CFRunLoopObserverInvalidate,
+                  CFRunLoopObserverRef, kCFRunLoopCommonModes
+                  , CFRunLoopRef, CFRunLoopSource, CFRunLoopSourceContext, CFRunLoopSourceCreate, CFRunLoopSourceInvalidate,
+                  CFRunLoopSourceSignal, CFRunLoopStop, CFRunLoopTimer, CFRunLoopTimerInvalidate, CFRunLoopTimerRef,
+                  CFRunLoopTimerSetNextFireDate, CFRunLoopWakeUp
+        },
+        string::{
+            CFString, CFStringRef
         },
     };
     extern "C" {
@@ -105,7 +101,7 @@ pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
         unsafe {
             Rc::increment_strong_count(ptr);
         }
-        return ptr as *const c_void
+        ptr as *const c_void
     }
 
     extern "C" fn release(info: * const c_void) {
@@ -118,7 +114,7 @@ pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
     }
 
 
-    extern  "C" fn dummy_perform(info: * const c_void) {
+    extern  "C" fn dummy_perform(_info: * const c_void) {
         unsafe {
             CFRunLoopStop(CFRunLoopGetCurrent());
         }
@@ -169,9 +165,9 @@ pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
             }
             return
         };
-        if event != kCFRunLoopBeforeWaiting {
-            return;
-        }
+        // if event != kCFRunLoopBeforeWaiting {
+        //     return;
+        // }
         runtime.run();
         match runtime.current_timeout() {
             Some(timeout) => {
@@ -188,7 +184,7 @@ pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
     });
     let observer = unsafe {
         CFRunLoopObserver::wrap_under_create_rule(
-            CFRunLoopObserverCreateWithHandler(null(), kCFRunLoopAllActivities, 1, 0, &observer_block)
+            CFRunLoopObserverCreateWithHandler(null(), kCFRunLoopBeforeWaiting, 1, 0, &observer_block)
         )
     };
     let context = Rc::new(
@@ -226,32 +222,33 @@ pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
         run_loop.add_timer(&timer, modal_string.as_concrete_TypeRef());
         run_loop.add_observer(&observer, modal_string.as_concrete_TypeRef());
     }
-    struct ContextResource {
-        timer: Rc<CFRunLoopTimer>,
-        observer:CFRunLoopObserver,
-        source:CFRunLoopSource,
-        cf_fd:CFFileDescriptor,
-    }
-    impl Drop for ContextResource {
-        fn drop(&mut self) {
-            unsafe {
-                CFRunLoopTimerInvalidate(self.timer.as_concrete_TypeRef());
-                CFRunLoopObserverInvalidate(self.observer.as_concrete_TypeRef());
-                CFRunLoopSourceInvalidate(self.source.as_concrete_TypeRef());
-                CFFileDescriptorInvalidate(self.cf_fd.as_concrete_TypeRef());
+
+    
+    runtime.enter(move || {
+        struct ContextResource {
+            timer: Rc<CFRunLoopTimer>,
+            observer:CFRunLoopObserver,
+            source:CFRunLoopSource,
+            cf_fd:CFFileDescriptor,
+        }
+        impl Drop for ContextResource {
+            fn drop(&mut self) {
+                unsafe {
+                    CFRunLoopTimerInvalidate(self.timer.as_concrete_TypeRef());
+                    CFRunLoopObserverInvalidate(self.observer.as_concrete_TypeRef());
+                    CFRunLoopSourceInvalidate(self.source.as_concrete_TypeRef());
+                    CFFileDescriptorInvalidate(self.cf_fd.as_concrete_TypeRef());
+                }
             }
         }
-    }
-    cf_fd
-        .enable_callbacks(kCFFileDescriptorReadCallBack);
-
-    let _context = ContextResource {
-        timer,
-        observer,
-        source,
         cf_fd
-    };
-    runtime.enter(move || {
+            .enable_callbacks(kCFFileDescriptorReadCallBack);
+        let _context = ContextResource {
+            timer,
+            observer,
+            source,
+            cf_fd
+        };
         let signal =  unsafe {
             let mut context = CFRunLoopSourceContext{
                 version: 0,
@@ -282,20 +279,23 @@ pub(crate) fn apple_run_loop<F: Future>(future: F) -> F::Output {
             .detach();
         CFRunLoop::get_current().add_source(&signal, unsafe { kCFRunLoopDefaultMode});
 
-        loop {
+        let output = loop {
             if let Some(result) = result.take() {
                 unsafe {
                     CFRunLoopSourceInvalidate(signal.as_concrete_TypeRef());
                 }
+
                 break result;
             }
-            let run_result = CFRunLoop::run_in_mode(
+            CFRunLoop::run_in_mode(
                 unsafe { kCFRunLoopDefaultMode },
                 Duration::MAX,
                 true,
             );
 
-        }
+        };
+        drop(_context);
+        output
     })
 }
 
