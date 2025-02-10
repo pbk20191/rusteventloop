@@ -40,9 +40,9 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
                 return (true, None)
             }
             if let Some(timeout) = self.runtime.current_timeout() {
-
                 if (timeout == Duration::ZERO) {
-                    return (true, None)
+                    // needs to call through check to call runtime::poll
+                    return (false, Some(0))
                 }
                 return (false, Some(timeout.as_millis() as u32))
 
