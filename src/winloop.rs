@@ -74,9 +74,8 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
         UI::WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetAncestor, IsDialogMessageW, KillTimer,
             MsgWaitForMultipleObjectsEx, PeekMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
-            UnhookWindowsHookEx, GA_ROOT, HHOOK, MSG, MSGF_DIALOGBOX,
-            MSGF_MENU, MSGF_MESSAGEBOX, MSGF_SCROLLBAR, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
-            PM_REMOVE, QS_ALLINPUT, USER_TIMER_MAXIMUM, WH_MSGFILTER, WM_QUIT
+            UnhookWindowsHookEx, GA_ROOT, HHOOK, MSG, MWMO_ALERTABLE, MWMO_INPUTAVAILABLE,
+            PM_REMOVE, QS_ALLINPUT, USER_TIMER_MAXIMUM, WH_MSGFILTER, WM_QUIT, WM_TIMER
         },
     };
     
@@ -150,28 +149,27 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
 
             SetTimer(0, timer.native, 1000, Some(transmute(*timer_closure.code_ptr())));
         };
-
+        let enter_message = std::rc::Rc::new(std::cell::Cell::new(0));
+        let proc_state = enter_message.clone();
         let message_proc = move |code: i32, w_param: WPARAM, l_param: LPARAM| -> LRESULT {
-
-            match code as u32 {
-                MSGF_DIALOGBOX | MSGF_MESSAGEBOX => {
-                    runtime_ref.poll_with(Some(Duration::ZERO));
-                    runtime_ref.run();
-                    match runtime_ref.current_timeout() {
-                        None =>  {
-                            // this procedure is called rapidly
-                            // so it would be better to do nothing, rather than updating timer to distant future
-                        }
-                        Some(timeout) => unsafe {
-                            SetTimer(0, timer_ref.native, timeout.as_millis() as u32, *timer_proc_ref.borrow());
-                        }
+            let msg:&MSG = unsafe {
+                let ptr:*mut MSG = transmute(l_param);
+                &mut *ptr
+            };
+            if msg.time != proc_state.get() {
+                runtime_ref.poll_with(Some(Duration::ZERO));
+                runtime_ref.run();
+                match runtime_ref.current_timeout() {
+                    None =>  {
+                        // this procedure is called rapidly
+                        // so it would be better to do nothing, rather than updating timer to distant future
                     }
-
+                    Some(timeout) => unsafe {
+                        SetTimer(0, timer_ref.native, timeout.as_millis() as u32, *timer_proc_ref.borrow());
+                    }
                 }
-                MSGF_MENU => {}
-                MSGF_SCROLLBAR => {}
-                _ => {}
             }
+
             unsafe {
                 CallNextHookEx(0, code, w_param, l_param)
             }
@@ -242,8 +240,17 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
                         break 'outer value;
                     }
                 }
+                if msg.hwnd == 0 && !msg.message == WM_TIMER {
+                    // thread message
+                    continue;
+                }
                 unsafe {
-                    if IsDialogMessageW(GetAncestor(msg.hwnd, GA_ROOT), &msg) == 0 {
+                    if {
+                        enter_message.set(msg.time);
+                        let check = IsDialogMessageW(GetAncestor(msg.hwnd, GA_ROOT), &msg);
+                        enter_message.set(0);
+                        check
+                    } == 0 {
                         TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
