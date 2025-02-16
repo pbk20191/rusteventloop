@@ -2,8 +2,7 @@ use std::future::Future;
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "ios", target_os = "android")))]
 pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
-    use std::cell::RefCell;
-    use std::ptr::null_mut;
+     use std::ptr::null_mut;
     use std::time::Duration;
     use compio::driver::AsRawFd;
     use compio::runtime::Runtime;
@@ -19,7 +18,7 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
 
     struct DriverSource {
         runtime:Runtime,
-        tag:RefCell<gpointer>
+        tag:gpointer
     }
 
     impl DriverSource {
@@ -28,7 +27,7 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
             let runtime = Runtime::new().unwrap();
             return Self {
                 runtime,
-                tag: RefCell::new(null_mut())
+                tag: null_mut()
             }
         }
     }
@@ -40,7 +39,7 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
                 return (true, None)
             }
             if let Some(timeout) = self.runtime.current_timeout() {
-                if (timeout == Duration::ZERO) {
+                if timeout == Duration::ZERO {
                     // needs to call through check to call runtime::poll
                     return (false, Some(0))
                 }
@@ -55,10 +54,9 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
     
         fn check(&self, source:&glib::Source) -> bool {
             let condition =  {
-                let k = self.tag.borrow();
                 unsafe {
                     IOCondition::from_glib(
-                        g_source_query_unix_fd(source.as_ptr(), *k)
+                        g_source_query_unix_fd(source.as_ptr(), self.tag)
                     )
                 }
             };
@@ -81,17 +79,19 @@ pub(crate) fn glib_context<F: Future>(future: F) -> F::Output {
     }
 
     let source = source_util::new_source(DriverSource::new());
-    let data:&DriverSource = source_util::source_get(&source);
-    {
-        let mut mut_tag = data.tag.borrow_mut();
-    
-        *mut_tag = unsafe {
+    {    
+        let data:&mut DriverSource = source_util::source_get(&source);
+        let tag_ptr = unsafe {
             let k = g_source_add_unix_fd(source.as_ptr(), data.runtime.as_raw_fd(), IOCondition::IN.into_glib());
             k
         };
+        data.tag = tag_ptr;
     }
 
-    let runtime = &data.runtime;
+    let runtime = {
+        let data:&DriverSource = source_util::source_get(&source);
+        &data.runtime
+    };
 
     let ctx = MainContext::default();
     return runtime.enter(|| {
@@ -183,10 +183,10 @@ mod source_util {
         }
     }
     
-    pub fn source_get<T: SourceFuncs>(source: &Source) -> &T {
+    pub fn source_get<T: SourceFuncs>(source: &Source) -> &mut T {
         unsafe {
-            &(*(<Source as ToGlibPtr<'_, *mut GSource>>::to_glib_none(source).0
-                as *const SourceData<T>))
+            &mut (*(<Source as ToGlibPtr<'_, *mut GSource>>::to_glib_none(source).0
+                as *mut SourceData<T>))
                 .data
         }
     }
