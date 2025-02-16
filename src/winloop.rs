@@ -111,7 +111,7 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
     runtime_ref.enter( move || {
         use std::cell::RefCell;
         use std::mem::transmute;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MSGF_DIALOGBOX, MSGF_MENU, MSGF_MESSAGEBOX, MSGF_SCROLLBAR, TIMERPROC};
+        use windows_sys::Win32::UI::WindowsAndMessaging::TIMERPROC;
 
         let timer =  {
             let handle = unsafe{
@@ -137,7 +137,6 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
                 }
                 Some(timeout) => unsafe {
                     SetTimer(0, timer_ref.native, timeout.as_millis() as u32, *timer_proc_ref.borrow());
-
                 }
             }
         };
@@ -147,16 +146,16 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
 
             timer_proc.replace(Some(transmute(*timer_closure.code_ptr())));
 
-            SetTimer(0, timer.native, 1000, Some(transmute(*timer_closure.code_ptr())));
+            SetTimer(0, timer.native, USER_TIMER_MAXIMUM, Some(transmute(*timer_closure.code_ptr())));
         };
-        let enter_message = std::rc::Rc::new(std::cell::Cell::new(0));
-        let proc_state = enter_message.clone();
+        let enter_message = RefCell::new(0u32);
+        let proc_state = &enter_message;
         let message_proc = move |code: i32, w_param: WPARAM, l_param: LPARAM| -> LRESULT {
             let msg:&MSG = unsafe {
                 let ptr:*mut MSG = transmute(l_param);
                 &mut *ptr
             };
-            if msg.time != proc_state.get() {
+            if msg.time != *proc_state.borrow() {
                 runtime_ref.poll_with(Some(Duration::ZERO));
                 runtime_ref.run();
                 match runtime_ref.current_timeout() {
@@ -187,12 +186,11 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
         };
         let mut my_job = job;
         my_job.spawn(input, runtime_ref);
-        
-        use std::ptr::null;
+
         'outer: loop {
             runtime_ref.poll_with(Some(Duration::ZERO));
             let remaining_tasks = runtime_ref.run();
-            if let Some(result) = my_job.check(null()) {
+            if let Some(result) = my_job.check(&None) {
                 break result;
             }
             let timeout = if remaining_tasks {
@@ -232,23 +230,19 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
             while unsafe{ PeekMessageW(msg.as_mut_ptr(), 0, 0, 0, PM_REMOVE)} != 0 {
                 let msg = unsafe { msg.assume_init() };
                 if msg.message == WM_QUIT {
-                    let k = &msg;
-                    use std::ffi::c_void;
-
-                    let k2 = (k as *const MSG) as *const c_void;
-                    if let Some(value) = my_job.check(k2) {
+                    if let Some(value) = my_job.check(&Some(msg)) {
                         break 'outer value;
                     }
                 }
-                if msg.hwnd == 0 && !msg.message == WM_TIMER {
-                    // thread message
-                    continue;
-                }
+                // if msg.hwnd == 0 && !msg.message == WM_TIMER {
+                //     // thread message
+                //     continue;
+                // }
                 unsafe {
                     if {
-                        enter_message.set(msg.time);
+                        *enter_message.borrow_mut() = msg.time;
                         let check = IsDialogMessageW(GetAncestor(msg.hwnd, GA_ROOT), &msg);
-                        enter_message.set(0);
+                        *enter_message.borrow_mut() = 0;
                         check
                     } == 0 {
                         TranslateMessage(&msg);
@@ -264,18 +258,17 @@ fn message_queue_impl<J: job_specialization::JobTrait>(job: J, input: J::Input) 
 #[cfg(target_os = "windows")]
 mod job_specialization {
     use compio::runtime::Runtime;
-    use std::ffi::c_void;
     use std::future::Future;
+    use windows_sys::Win32::UI::WindowsAndMessaging::MSG;
 
     pub trait JobTrait {
 
         type Output;
         type Input;
-        // fn check() -> bool;
 
         fn spawn(&mut self, input:Self::Input, runtime: &Runtime);
 
-        fn check(&mut self, msg: *const c_void) -> Option<Self::Output>;
+        fn check(&mut self, msg: &Option<MSG>) -> Option<Self::Output>;
 
     }
 
@@ -298,15 +291,12 @@ mod job_specialization {
 
         }
 
-        fn check(&mut self, msg: *const c_void) -> Option<Self::Output> {
-            if msg.is_null() {
+        fn check(&mut self, msg: &Option<MSG>) -> Option<Self::Output> {
+            let Some(message) = msg else {
                 return None;
-            }
-            use windows_sys::Win32::UI::WindowsAndMessaging::{
-                MSG, WM_QUIT
             };
+            use windows_sys::Win32::UI::WindowsAndMessaging::WM_QUIT;
 
-            let message = &unsafe { *(msg as *const MSG) };
             if message.message == WM_QUIT {
                 Some(message.wParam as i32)
             } else {
@@ -327,7 +317,7 @@ mod job_specialization {
             }
         }
 
-        fn check(&mut self, _msg: *const c_void) -> Option<Self::Output> {
+        fn check(&mut self, _msg: &Option<MSG>) -> Option<Self::Output> {
             if let Some(variable) = self.variable.take() {
                 Some(variable)
             } else {
@@ -335,6 +325,76 @@ mod job_specialization {
             }
         }
 
+
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn thread_pool() {
+    use std::ptr::null;
+    use windows_sys::Win32::System::Threading::{
+        CloseThreadpool,
+        CreateThreadpool, CreateThreadpoolTimer, PTP_POOL};
+
+    use std::ptr::null_mut;
+    use windows_sys::Win32::System::Threading::{CloseThreadpoolTimer, PTP_CALLBACK_INSTANCE, PTP_IO, PTP_TIMER, PTP_WAIT};
+
+    struct WinThreadPool {
+
+        native:PTP_POOL,
+
+
+
+
+    }
+
+    impl WinThreadPool {
+        pub fn new() -> Self {
+            let io = unsafe { CreateThreadpool(null()) };
+            return Self {native: io};
+        }
+    }
+    let pool = WinThreadPool::new();
+    // InitializeThreadpoolEnvironment()
+    
+    struct ThreadPoolTimer{
+        native:PTP_TIMER,
+    }
+    impl ThreadPoolTimer {
+        pub fn new() -> Self {
+            let native = unsafe {
+                CreateThreadpoolTimer(Some(timer_callback), null_mut(), null_mut())
+            };
+            Self {native }
+        }
+    }
+    impl Drop for ThreadPoolTimer {
+        fn drop(&mut self) {
+            unsafe {
+                CloseThreadpoolTimer(self.native);
+            }
+        }
+    }
+    impl Drop for WinThreadPool {
+
+
+        fn drop(&mut self) {
+            unsafe {
+                CloseThreadpool(self.native);
+            }
+        }
+    }
+
+
+
+    pub type PTP_TIMER_CALLBACK = ::core::option::Option<unsafe extern "system" fn(instance: PTP_CALLBACK_INSTANCE, context: *mut ::core::ffi::c_void, timer: PTP_TIMER) -> ()>;
+    pub type PTP_WAIT_CALLBACK = ::core::option::Option<unsafe extern "system" fn(instance: PTP_CALLBACK_INSTANCE, context: *mut ::core::ffi::c_void, wait: PTP_WAIT, waitresult: u32) -> ()>;
+    pub type PTP_WIN32_IO_CALLBACK = ::core::option::Option<unsafe extern "system" fn(instance: PTP_CALLBACK_INSTANCE, context: *mut ::core::ffi::c_void, overlapped: *mut ::core::ffi::c_void, ioresult: u32, numberofbytestransferred: usize, io: PTP_IO) -> ()>;
+
+    unsafe extern "system" fn timer_callback(instance: PTP_CALLBACK_INSTANCE, context: *mut ::core::ffi::c_void, timer: PTP_TIMER) {
+        
+    }
+    unsafe extern "system" fn PTP_SIMPLE_CALLBACK(instance: PTP_CALLBACK_INSTANCE, context: *mut ::core::ffi::c_void) {
 
     }
 }
